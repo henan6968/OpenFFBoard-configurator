@@ -80,6 +80,24 @@ DEFAULTLANG = "en_US"
 # Internal signature
 PUBKEY = bytes.fromhex("7d78762398c6e397e4faa2b03c4cdfa481c2c861add82bc8a5f6ed369d8259c0")
 
+def parse_signature_text(signature):
+    """Decode a signature reply, returning b'' when it is not readable.
+
+    A board with an unprogrammed or unreadable signature can answer with
+    something that is not a hex string at all. Raising here would escape
+    the reply callback (only RuntimeError is guarded), so the failure was
+    logged for every subsequent reply and the callback was never
+    released.
+    """
+    text = "".join(str(signature).split())
+    if not text or text == "0" or len(text) % 2 != 0:
+        return bytes(0)
+    try:
+        return bytes.fromhex(text)
+    except ValueError:
+        return bytes(0)
+
+
 class MainUi(PyQt6.QtWidgets.QMainWindow, base_ui.WidgetUI, base_ui.CommunicationHandler):
     """Display and manage the main UI."""
     tabsinitialized = PyQt6.QtCore.pyqtSignal(bool)
@@ -788,10 +806,7 @@ class MainUi(PyQt6.QtWidgets.QMainWindow, base_ui.WidgetUI, base_ui.Communicatio
         if not connected:
             return
         def sig_cb(signature):
-            if(signature == "0" or len(signature) % 2 != 0):
-                self.hwsignature = bytes(0)
-            else:
-                self.hwsignature = bytes.fromhex(signature)
+            self.hwsignature = parse_signature_text(signature)
             if(self.hwsignature != None and self.hwuid != None):
                 self.signature_check(self.hwsignature,self.hwuid)
 
