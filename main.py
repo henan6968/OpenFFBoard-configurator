@@ -50,6 +50,7 @@ import activelist
 import tmcdebug_ui
 import odrive_ui
 import vesc_ui
+import vescuart_conf_ui
 import effects_monitor
 import effects_graph_ui
 import updater
@@ -521,6 +522,15 @@ class MainUi(PyQt6.QtWidgets.QMainWindow, base_ui.WidgetUI, base_ui.Communicatio
                     self.profile_ui.set_save_btn(True)
                 elif classe_active["id"] == 0x87 or classe_active["id"] == 0x88:
                     classe = vesc_ui.VescUI(main=self, unique=classe_active["unique"])
+                    name_axis = classe_active["name"]
+                    self.active_classes[name] = classe
+                    self.add_tab(classe, name_axis)
+                    self.profile_ui.set_save_btn(True)
+                elif classe_active["id"] == 0x8D or classe_active["id"] == 0x8E:
+                    # VescUART: same VESC but over UART instead of CAN
+                    classe = vescuart_conf_ui.VescUARTUI(
+                        main=self, unique=classe_active["unique"]
+                    )
                     name_axis = classe_active["name"]
                     self.active_classes[name] = classe
                     self.add_tab(classe, name_axis)
