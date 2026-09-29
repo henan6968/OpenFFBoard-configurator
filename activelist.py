@@ -72,7 +72,7 @@ class ActiveClassDialog(PyQt6.QtWidgets.QDialog):
         self.layout.setContentsMargins(0,0,0,0)
         self.layout.addWidget(self.active_class_ui)
         self.setLayout(self.layout)
-        self.setWindowTitle("Active modules")
+        self.setWindowTitle(self.tr("Active modules"))
 
 class ActiveClassUI(WidgetUI, CommunicationHandler):
     def __init__(self, parent = None):

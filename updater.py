@@ -202,7 +202,7 @@ class UpdateNotification(QDialog):
     def __init__(self,release,main,desc,curver,donotnotifysetting = None):
         self.main = main
         QDialog.__init__(self, main)
-        self.setWindowTitle("Update available")
+        self.setWindowTitle(self.tr("Update available"))
         self.vbox = QVBoxLayout()
         self.setLayout(self.vbox)
         self.infolabel = QLabel(desc)

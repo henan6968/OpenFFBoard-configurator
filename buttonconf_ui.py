@@ -258,7 +258,7 @@ class ShifterButtonsConf(OptionsDialogGroupBox,CommunicationHandler):
         posGroup.addWidget(QLabel("Calculated Gear"), 2, 1, 1, 2)
         posGroup.addWidget(self.gear, 2, 3, 1, 2)
         posGroupBox = QGroupBox()
-        posGroupBox.setTitle("Current")
+        posGroupBox.setTitle(self.tr("Current"))
         posGroupBox.setLayout(posGroup)
         vbox.addWidget(posGroupBox)
 

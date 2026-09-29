@@ -113,7 +113,7 @@ class EffectsMonitorDialog(QDialog):
         self.layout.setContentsMargins(0,0,0,0)
         self.layout.addWidget(self.ui)
         self.setLayout(self.layout)
-        self.setWindowTitle("Effects statistics")
+        self.setWindowTitle(self.tr("Effects statistics"))
     
     def set_max_axes(self,axes):
         self.ui.spinBox_axis.setMaximum(axes)

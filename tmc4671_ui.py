@@ -472,7 +472,7 @@ class TMC4671Ui(WidgetUI,CommunicationHandler):
     def tmcChipTypeCB(self,type : str):
         if not type.startswith("TMC"):
             self.main.log("Can not find TMC")
-            self.groupBox_tmc.setTitle("Driver (not connected)")
+            self.groupBox_tmc.setTitle(self.tr("Driver (not connected)"))
             self.setEnabled(False)
             self.timer.stop()
             self.timer_status.stop()

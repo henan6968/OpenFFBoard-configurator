@@ -20,22 +20,22 @@ class EncoderOptions(QGroupBox):
         layout = QVBoxLayout()
 
         found = True
-        self.setTitle("Encoder settings")
+        self.setTitle(self.tr("Encoder settings"))
         if(id == 2): # local encoder
             self.widget = (LocalEncoderConf(self,self.main))
-            self.setTitle("Local Encoder")
+            self.setTitle(self.tr("Local Encoder"))
         elif(id == 1): # tmc
             layout.addWidget(QLabel("Configure in TMC tab"))
             found = False
         elif(id == 4): # MT SPI
             self.widget = (MtEncoderConf(self,self.main))
-            self.setTitle("SPI Settings")
+            self.setTitle(self.tr("SPI Settings"))
         elif(id == 5): # BISS-C
             self.widget = (BissEncoderConf(self,self.main))
-            self.setTitle("BISS Settings")
+            self.setTitle(self.tr("BISS Settings"))
         elif(id == 6): # SSI
             self.widget = (SsiEncoderConf(self,self.main))
-            self.setTitle("SSI Settings")
+            self.setTitle(self.tr("SSI Settings"))
         else:
             layout.addWidget(QLabel("No settings"))
 

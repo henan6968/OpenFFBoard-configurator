@@ -74,7 +74,7 @@ class ActiveTaskDialog(PyQt6.QtWidgets.QDialog):
         self.layout.setContentsMargins(0,0,0,0)
         self.layout.addWidget(self.active_class_ui)
         self.setLayout(self.layout)
-        self.setWindowTitle("Active threads")
+        self.setWindowTitle(self.tr("Active threads"))
 
     def set_taskstats_enabled(self,enabled):
         self.active_class_ui.taskstats_enabled = enabled

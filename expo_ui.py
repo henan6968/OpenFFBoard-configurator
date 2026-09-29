@@ -155,7 +155,7 @@ class ExpoTuneDialog(PyQt6.QtWidgets.QDialog):
         self.layout.setContentsMargins(0, 0, 0, 0)
         self.layout.addWidget(self.expo_ui)
         self.setLayout(self.layout)
-        self.setWindowTitle("Expo curve tuning")
+        self.setWindowTitle(self.tr("Expo curve tuning"))
         self.setModal(True)
 
         self.enabled = False

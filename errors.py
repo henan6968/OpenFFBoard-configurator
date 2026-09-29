@@ -79,7 +79,7 @@ class ErrorsDialog(QDialog):
         self.layout.setContentsMargins(0, 0, 0, 0)
         self.layout.addWidget(self.ui)
         self.setLayout(self.layout)
-        self.setWindowTitle("Errors")
+        self.setWindowTitle(self.tr("Errors"))
 
     def registerCallbacks(self):
         self.ui.registerCallbacks()

@@ -271,7 +271,7 @@ class EffectsGraphDialog(PyQt6.QtWidgets.QDialog):
         self.layout.setContentsMargins(0, 0, 0, 0)
         self.layout.addWidget(self.graph_ui)
         self.setLayout(self.layout)
-        self.setWindowTitle("Effects graphics")
+        self.setWindowTitle(self.tr("Effects graphics"))
     
     def set_max_axes(self,axes):
         self.graph_ui.spinBox_axis.setMaximum(axes)

@@ -181,7 +181,7 @@ class DFUModeUI(base_ui.WidgetUI, base_ui.CommunicationHandler):
         """Ask an confirmation on erase click button event."""
         msg = PyQt6.QtWidgets.QMessageBox()
         msg.setIcon(PyQt6.QtWidgets.QMessageBox.Icon.Warning)
-        msg.setWindowTitle("Full chip erase")
+        msg.setWindowTitle(self.tr("Full chip erase"))
         msg.setText("Fully erase the chip?")
         msg.setInformativeText(
             "This erases EVERYTHING.\nFirmware and settings.\nYou may need a programmer "
@@ -239,7 +239,7 @@ class DFUModeUI(base_ui.WidgetUI, base_ui.CommunicationHandler):
             self.log(warnmsg + "\n")
             msg = PyQt6.QtWidgets.QMessageBox()
             msg.setIcon(PyQt6.QtWidgets.QMessageBox.Icon.Warning)
-            msg.setWindowTitle("WARNING")
+            msg.setWindowTitle(self.tr("WARNING"))
             msg.setText(self.tr("Firmware mismatch detected!"))
             msg.setInformativeText(warnmsg)
             ret = msg.exec()

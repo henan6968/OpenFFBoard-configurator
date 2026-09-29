@@ -569,7 +569,7 @@ class AdvancedTuningDialog(PyQt6.QtWidgets.QDialog):
         self.layout.setContentsMargins(0, 0, 0, 0)
         self.layout.addWidget(self.advanced_tweak_ui)
         self.setLayout(self.layout)
-        self.setWindowTitle("Advanced encoder tuning")
+        self.setWindowTitle(self.tr("Advanced encoder tuning"))
         self.setModal(True)
 
     def setEnabled(self, a0: bool) -> None:  # pylint: disable=unused-argument, invalid-name
