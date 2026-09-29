@@ -31,13 +31,35 @@ class SerialComms(QObject):
 
     def __init__(self,main,serialport : PyQt6.QtSerialPort.QSerialPort):
         QObject.__init__(self)
-        self.serial : PyQt6.QtSerialPort.QSerialPort = serialport 
+        self.serial : PyQt6.QtSerialPort.QSerialPort = None
         self.main=main
-        self.serial.readyRead.connect(self.serialReceive)
-        self.serial.aboutToClose.connect(self.reset)
+        self.attach(serialport)
         self.replytext = ""
         self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self.logger = logging.getLogger("serial_comms")
+
+    def attach(self, serialport : PyQt6.QtSerialPort.QSerialPort):
+        """Point the communication module at a (new) serial port.
+
+        The configurator replaces the QSerialPort object after every
+        connection attempt, because a port whose open() blocked can
+        never be reused. The signal wiring follows the live object.
+        """
+        if serialport is self.serial:
+            return
+        if self.serial is not None:
+            try:
+                self.serial.readyRead.disconnect(self.serialReceive)
+            except (TypeError, RuntimeError):
+                pass
+            try:
+                self.serial.aboutToClose.disconnect(self.reset)
+            except (TypeError, RuntimeError):
+                pass
+        self.serial = serialport
+        if serialport is not None:
+            serialport.readyRead.connect(self.serialReceive)
+            serialport.aboutToClose.connect(self.reset)
 
     @staticmethod
     def registerCallback(handler,cls,cmd,callback,instance=0,conversion=None,adr=None,delete=False,typechar='?'):

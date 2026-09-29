@@ -15,6 +15,7 @@ version = "1.8.7"
 import sys
 import functools
 import logging
+import threading
 import logging.config
 from typing import List
 import glob
@@ -44,6 +45,7 @@ import axis_ui
 import tmc4671_ui
 import pwmdriver_ui
 import serial_comms
+import safe_serial
 import midi_ui
 import errors
 import activelist
@@ -58,6 +60,13 @@ import simplemotion_ui
 import activetasks
 import rmd_ui
 import canremote_ui
+
+# Auto-connect pacing. The window is shown first, then the serial device is
+# probed; a probe that cannot open the port is retried from the event loop so
+# the GUI never stops processing events while a device is misbehaving.
+AUTOCONNECT_START_DELAY_MS = 250
+AUTOCONNECT_RETRY_MS = 750
+MAX_AUTOCONNECT_RETRIES = 4
 
 # This GUIs version
 VERSION = "1.17.1"
@@ -76,6 +85,8 @@ class MainUi(PyQt6.QtWidgets.QMainWindow, base_ui.WidgetUI, base_ui.Communicatio
     tabsinitialized = PyQt6.QtCore.pyqtSignal(bool)
     maxaxischanged = PyQt6.QtCore.pyqtSignal(int)
     languagechanged = PyQt6.QtCore.pyqtSignal()
+    #: Emitted from the background update check with (release, fw version).
+    firmware_update_available = PyQt6.QtCore.pyqtSignal(object, str)
     def __init__(self):
         """Init the mainUI : init the UI, all the dlg element, and the main timer."""
         PyQt6.QtWidgets.QMainWindow.__init__(self)
@@ -87,8 +98,14 @@ class MainUi(PyQt6.QtWidgets.QMainWindow, base_ui.WidgetUI, base_ui.Communicatio
         base_ui.WidgetUI.__init__(self, None, "MainWindow.ui")
 
         self.restart_app_flag = False
+        self._autoconnect_retries = 0
+        self._connect_in_progress = False
 
-        self.serial = PyQt6.QtSerialPort.QSerialPort()
+        # The live serial port. SerialChooser swaps it after every connection
+        # attempt, so a port whose open() blocked is never reused: a wedged
+        # USB CDC board makes QSerialPort.open() hang in a kernel IOCTL
+        # that has no timeout at all (see safe_serial.py).
+        self._serial = None
         base_ui.CommunicationHandler.comms = serial_comms.SerialComms(self, self.serial)
         self.main_class_ui = None
         self.timeouting = False
@@ -157,6 +174,8 @@ class MainUi(PyQt6.QtWidgets.QMainWindow, base_ui.WidgetUI, base_ui.Communicatio
         self.serialchooser.connected.connect(self.systray.set_connected)
         self.serialchooser.connected.connect(self.profile_ui.setEnabled)
 
+        self.firmware_update_available.connect(self.show_firmware_update)
+
         # Status Bar
         self.wrapper_status_bar = WrapperStatusBar(self.statusBar())
         self.serialchooser.connected.connect(self.wrapper_status_bar.serial_connected)
@@ -213,10 +232,54 @@ class MainUi(PyQt6.QtWidgets.QMainWindow, base_ui.WidgetUI, base_ui.Communicatio
         self.groupBox_main.setLayout(layout)
         
         
-    def autoconnect(self) :
-        # after UI load get serial port and if only one : autoconnect
+    @property
+    def serial(self):
+        """The serial port currently in use, or None when disconnected."""
+        chooser = getattr(self, 'serialchooser', None)
+        if chooser is not None:
+            return getattr(chooser, 'port', None)
+        return self._serial
+
+    @serial.setter
+    def serial(self, port):
+        """Allow the port to be stored before the serial chooser exists."""
+        self._serial = port
+
+    def autoconnect(self):
+        """Look for a board and connect to it without blocking the UI.
+
+        This runs from a QTimer so the window is already painted by the time
+        the serial port is touched. Opening a wedged USB CDC device used to
+        block the GUI thread forever inside QSerialPort.open(); the port is a
+        SafeSerialPort with a hard timeout now, and a failed attempt is
+        retried a few times from the event loop instead of spinning.
+        """
+        if self._connect_in_progress:
+            return
+
         nb_device_compat = self.serialchooser.get_ports()
-        self.serialchooser.auto_connect(nb_device_compat)
+        if nb_device_compat == 0:
+            self.log("No FFBoard device found")
+            return
+        if nb_device_compat > 1:
+            self.log("Several FFBoard devices found, please pick one")
+            return
+
+        if self.serialchooser.try_auto_connect():
+            self._autoconnect_retries = 0
+            return
+
+        self._autoconnect_retries += 1
+        if self._autoconnect_retries > MAX_AUTOCONNECT_RETRIES:
+            self.log(
+                "Auto-connect gave up after %d attempts. "
+                "Press Connect to try again." % self._autoconnect_retries
+            )
+            return
+
+        self.log("Board not ready, retrying (%d/%d)..."
+                 % (self._autoconnect_retries, MAX_AUTOCONNECT_RETRIES))
+        PyQt6.QtCore.QTimer.singleShot(AUTOCONNECT_RETRY_MS, self.autoconnect)
 
     def load_language_id(self, langid:str):
         """load language file"""
@@ -376,7 +439,8 @@ class MainUi(PyQt6.QtWidgets.QMainWindow, base_ui.WidgetUI, base_ui.Communicatio
 
     def update_timer(self):
         """Check on timer if the port is always opened."""
-        if self.serial.isOpen():
+        port = self.serial
+        if port is not None and port.isOpen():
             if self.timeouting:
                 self.timeouting = False
                 self.reset_port()
@@ -665,16 +729,35 @@ class MainUi(PyQt6.QtWidgets.QMainWindow, base_ui.WidgetUI, base_ui.Communicatio
         if self.profile_ui.get_global_setting("donotnotify_updates",False):
             return
 
-        # Check github
+        # The GitHub lookup is network IO and must never run on the GUI thread:
+        # a slow or proxied TLS handshake blocks the event loop for as long as
+        # it takes, which reads to the user as a frozen window. It runs on a
+        # daemon thread and hands the result back through a queued signal.
+        fw_version = self.fw_version_str
+        threading.Thread(
+            target=self._check_firmware_updates,
+            args=(fw_version,),
+            name="update-check",
+            daemon=True,
+        ).start()
+
+    def _check_firmware_updates(self, fw_version):
+        """Fetch the latest release in the background. Runs off the GUI thread."""
         try:
             mainreporelease = updater.GithubRelease.get_latest_release(updater.MAINREPO)
-        except Exception:
+            releaseversion, _ = updater.GithubRelease.get_version(mainreporelease)
+            outdated = updater.UpdateChecker.compare_versions(fw_version, releaseversion)
+        except Exception:  # pylint: disable=broad-except
             return
-        releaseversion,_ = updater.GithubRelease.get_version(mainreporelease)
-        if updater.UpdateChecker.compare_versions(self.fw_version_str,releaseversion):
-            # New release available for firmware
-            msg = self.tr( "New firmware available")
-            updater.UpdateNotification(mainreporelease,self,msg,self.fw_version_str).exec()
+
+        if outdated:
+            # Queued connection: the dialog is built on the GUI thread.
+            self.firmware_update_available.emit(mainreporelease, fw_version)
+
+    def show_firmware_update(self, mainreporelease, fw_version):
+        """Offer the new firmware. Called on the GUI thread."""
+        msg = self.tr("New firmware available")
+        updater.UpdateNotification(mainreporelease, self, msg, fw_version).exec()
 
     def signature_check(self,signature,uid,suffix=""):
         """Checks if the chip signature matches its UID"""
@@ -958,6 +1041,30 @@ class WrapperStatusBar(base_ui.WidgetUI):
     def set_board_text(self,text):
         self.label_board.setText(text)
 
+    def set_connection_status(self, state, text):
+        """Report what the serial link is doing, without blocking.
+
+        Shown in the status bar so a device that never answers is
+        visible immediately instead of looking like a frozen window.
+        """
+        label = {
+            'connecting': self.tr("Connecting"),
+            'noresponse': self.tr("No response"),
+            'failed': self.tr("Connection failed"),
+            'open': self.tr("Connected"),
+        }.get(state, state)
+        try:
+            window = self.window()
+            bar = window.statusBar() if window is not None else None
+            if bar is not None:
+                bar.showMessage("%s: %s" % (label, text), 15000)
+        except RuntimeError:
+            pass  # window already torn down
+        if state == 'noresponse':
+            self.label_cnx.setPixmap(self.icon_err)
+        elif state == 'failed':
+            self.label_cnx.setPixmap(self.icon_ko)
+
     def update_ffb_rate(self, event):
         status, rate, cfrate = event
         if status == 1:
@@ -1152,7 +1259,11 @@ if __name__ == "__main__":
         window.show()
         # Defer update check so UI loads instantly even without internet
         PyQt6.QtCore.QTimer.singleShot(2000, window.check_configurator_update)
-        window.autoconnect()
+        # Autoconnect from the event loop: the window is painted first and a
+        # wedged serial device is absorbed by the SafeSerialPort timeouts.
+        PyQt6.QtCore.QTimer.singleShot(
+            AUTOCONNECT_START_DELAY_MS, window.autoconnect
+        )
 
         exit_code = app.exec()
         # Check if we need to restart

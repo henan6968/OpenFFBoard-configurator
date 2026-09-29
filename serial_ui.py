@@ -6,14 +6,20 @@ and the link with the communication module.
 Module : serial_ui
 Authors : yannick
 """
-from concurrent.futures import process
+import PyQt6.QtCore
 import PyQt6.QtGui
 import PyQt6.QtSerialPort
-import PyQt6.QtCore
 import PyQt6.QtWidgets
 import base_ui
-import main
 import helper
+import main
+import safe_serial
+
+BAUDRATE = 115200
+"""Baud rate used to talk to the board."""
+
+CONNECT_POLL_MS = 100
+"""How often the connect worker is polled."""
 
 
 class SerialChooser(base_ui.WidgetUI, base_ui.CommunicationHandler):
@@ -34,7 +40,6 @@ class SerialChooser(base_ui.WidgetUI, base_ui.CommunicationHandler):
         """Initialize the manager with the QSerialPort for serial commmunication and the mainUi."""
         base_ui.WidgetUI.__init__(self, main_ui, "serialchooser.ui")
         base_ui.CommunicationHandler.__init__(self)
-        self._serial = serial
         self.main = main_ui
         self.main_id = None
         self._classes = []
@@ -43,8 +48,21 @@ class SerialChooser(base_ui.WidgetUI, base_ui.CommunicationHandler):
         self._ports = []
         self._logging = False
         self._closing = False
+        self._pending_connect = False
 
+        # The serial device is not opened on the GUI thread: a wedged USB CDC
+        # board makes QSerialPort.open() block in a kernel IOCTL that has no
+        # timeout, which used to freeze the whole application. Opening happens
+        # on a worker thread instead (see safe_serial.py).
+        self._opener = safe_serial.PortOpener(self)
+        self._serial = serial
+        if self._serial is None:
+            self._serial = safe_serial.make_port()
         self._serial.errorOccurred.connect(self.serial_error)
+
+        self._connect_timer = PyQt6.QtCore.QTimer(self)
+        self._connect_timer.setInterval(CONNECT_POLL_MS)
+        self._connect_timer.timeout.connect(self._poll_connect)
 
         self.pushButton_refresh.clicked.connect(self.get_ports)
         self.pushButton_connect.clicked.connect(self.serial_connect_button)
@@ -53,6 +71,50 @@ class SerialChooser(base_ui.WidgetUI, base_ui.CommunicationHandler):
         self.pushButton_ok.clicked.connect(self.main_btn)
 
         self.update()
+
+    # ------------------------------------------------------------------
+    # port ownership
+    # ------------------------------------------------------------------
+
+    @property
+    def port(self):
+        """The QSerialPort currently in use, or None when disconnected."""
+        return self._serial
+
+    def _status(self, state, text):
+        """Show connection progress in the status bar, if there is one."""
+        bar = getattr(self.main, 'wrapper_status_bar', None)
+        if bar is not None:
+            bar.set_connection_status(state, text)
+
+    @port.setter
+    def port(self, new_port):
+        """Swap in a freshly opened port and rewire the signals."""
+        old = self._serial
+        if old is not new_port:
+            safe_serial.detach_signals(old, self.serial_error)
+        self._serial = new_port
+        if new_port is None:
+            return
+        new_port.errorOccurred.connect(self.serial_error)
+
+        comms = getattr(base_ui.CommunicationHandler, 'comms', None)
+        if comms is not None and getattr(comms, 'serial', None) is not new_port:
+            comms.attach(new_port)
+
+    def _discard_port(self, port):
+        """Stop using a port, keeping it referenced but never used again."""
+        if port is None:
+            return
+        safe_serial.detach_signals(port, self.serial_error)
+        safe_serial.discard_port(port)
+        self._opener.graveyard.append(port)
+        if self._serial is port:
+            self._serial = None
+
+    # ------------------------------------------------------------------
+    # UI events
+    # ------------------------------------------------------------------
 
     def showEvent(self, event): # pylint: disable=unused-argument, invalid-name
         """On show event, init the param.
@@ -92,7 +154,9 @@ class SerialChooser(base_ui.WidgetUI, base_ui.CommunicationHandler):
 
     def write(self, data):
         """Write data to the serial port."""
-        self._serial.write(data)
+        port = self._serial
+        if port is not None and port.isOpen():
+            port.write(data)
 
     def update(self):
         """Update the UI when a connection is successfull.
@@ -100,7 +164,8 @@ class SerialChooser(base_ui.WidgetUI, base_ui.CommunicationHandler):
         Disable connection button, dropbox, etc.
         Emit for all the UI the [connected] event.
         """
-        if self._serial.isOpen():
+        port = self._serial
+        if port is not None and port.isOpen():
             self.pushButton_connect.setText(self.tr("Disconnect"))
             self.comboBox_port.setEnabled(False)
             self.pushButton_refresh.setEnabled(False)
@@ -117,30 +182,125 @@ class SerialChooser(base_ui.WidgetUI, base_ui.CommunicationHandler):
             self.connected.emit(False)
             self.groupBox_system.setEnabled(False)
 
+    # ------------------------------------------------------------------
+    # connect / disconnect
+    # ------------------------------------------------------------------
+
     def serial_connect_button(self):
-        """Check if it's not connected, and call start the serial connection."""
-        if not self._serial.isOpen() and self._port is not None:
-            self.serial_connect()
+        """Connect when disconnected, disconnect when connected."""
+        port = self._serial
+        if port is not None and port.isOpen():
+            self.disconnect_port()
         else:
-            self._serial.close()
+            self.serial_connect()
 
         self.update()
 
     def serial_connect(self):
-        """Check if port is not open and open it with right settings."""
-        self.select_port(self.comboBox_port.currentIndex())
+        """Start opening the selected port, without blocking the GUI thread.
 
-        if not self._serial.isOpen() and self._port is not None:
-            self.main.log("Connecting...")
-            self._serial.setPort(self._port)
-            self._serial.setBaudRate(115200)
-            self._serial.open(PyQt6.QtCore.QIODevice.OpenModeFlag.ReadWrite)
-            if not self._serial.isOpen():
-                self.main.log("Can not open port")
-            else:
-                # Discard whatever the OS buffered before we started listening
-                self._serial.clear(PyQt6.QtSerialPort.QSerialPort.Direction.AllDirections)
-                self._serial.setDataTerminalReady(True)
+        Returns True when a port is already open, False while an attempt is
+        in flight. The outcome arrives later, through :meth:`_poll_connect`.
+        """
+        if self._pending_connect or self._opener.busy:
+            return False
+
+        self.select_port(self.comboBox_port.currentIndex())
+        if self._port is None:
+            self.main.log("No serial port selected")
+            return False
+
+        port = self._serial
+        if port is not None and port.isOpen():
+            return True
+
+        self._pending_connect = True
+        self.main.log("Connecting to %s..." % self._port.portName())
+        self._status('connecting', self._port.portName())
+        self.pushButton_connect.setEnabled(False)
+        self._opener.reset()
+        self._opener.open(self._port.portName(), BAUDRATE)
+        self._connect_timer.start()
+        return False
+
+    def try_auto_connect(self):
+        """Start connecting once, without any dialog.
+
+        Returns True when the link is already up. Auto-connect treats a False
+        return as "retry later" and never blocks on it.
+        """
+        if self.serial_connect():
+            return True
+        port = self._serial
+        return port is not None and port.isOpen()
+
+    def _poll_connect(self):
+        """Collect the result of the open worker. Runs on the GUI thread."""
+        if self._opener.timed_out:
+            self._connect_timer.stop()
+            self._pending_connect = False
+            self.pushButton_connect.setEnabled(True)
+            result = self._opener.abandon()
+            self._on_open_finished(result)
+            return
+
+        result = self._opener.poll()
+        if result is None:
+            return
+
+        self._connect_timer.stop()
+        self._pending_connect = False
+        self.pushButton_connect.setEnabled(True)
+        self._on_open_finished(result)
+
+    def _on_open_finished(self, result):
+        """Finish a connection attempt using the worker's result."""
+        if result is None:
+            return
+        if result.timed_out:
+            portname = self._port.portName() if self._port is not None else "?"
+            self.main.log(
+                "Port %s is not responding after %d ms: the device is probably "
+                "crashed or stuck mid-reset." % (portname, safe_serial.OPEN_TIMEOUT_MS)
+            )
+            self._status('noresponse',
+                         "%s did not answer within %d ms"
+                         % (portname, safe_serial.OPEN_TIMEOUT_MS))
+            self.main.log(
+                "Unplug and replug the board (or check that no other program "
+                "holds the port), then press Connect again."
+            )
+            self.update()
+            return
+
+        if not result.ok:
+            self._report_open_failure(result)
+            self._discard_port(result.port)
+            self.update()
+            return
+
+        self.port = result.port
+        self.main.log("Port %s open" % self._port.portName())
+        self._status('open', self._port.portName())
+        self.update()
+
+    def _report_open_failure(self, result):
+        """Explain why the port could not be opened."""
+        portname = self._port.portName() if self._port is not None else "?"
+        self.main.log("Can not open port %s (%s)" % (portname, result.message))
+        self._status('failed', "%s: %s" % (portname, result.message))
+        self.main.log(
+            "If another program is using the port, close it first. "
+            "If the board is crashed or still resetting, unplug and replug it."
+        )
+
+    def disconnect_port(self):
+        """Close the current port and let the board go."""
+        self._discard_port(self._serial)
+        self._opener.stop_thread(CONNECT_POLL_MS)
+        self._pending_connect = False
+        self._connect_timer.stop()
+        self.pushButton_connect.setEnabled(True)
 
     def serial_error(self, error):
         """Close the port when the device reports an unrecoverable error."""
@@ -148,8 +308,12 @@ class SerialChooser(base_ui.WidgetUI, base_ui.CommunicationHandler):
         if error in (errors.NoError, errors.NotOpenError) or self._closing:
             return
 
-        self.main.log("Serial error: " + self._serial.errorString())
-        if error in (errors.ResourceError, errors.DeviceNotFoundError, errors.PermissionError) and self._serial.isOpen():
+        port = self._serial
+        if port is None:
+            return
+
+        self.main.log("Serial error: " + port.errorString())
+        if error in (errors.ResourceError, errors.DeviceNotFoundError, errors.PermissionError) and port.isOpen():
             self._closing = True
             self.main.reset_port(immediate=True)
             self._closing = False
@@ -218,9 +382,10 @@ class SerialChooser(base_ui.WidgetUI, base_ui.CommunicationHandler):
         self.update()
 
         return nb_compatible_device
-    
+
     def auto_connect(self, nb_compatible_device):
-        if (nb_compatible_device == 1) :
+        """Connect straight away when there is exactly one board."""
+        if nb_compatible_device == 1:
             self.serial_connect_button()
 
     def update_mains(self, dat):
