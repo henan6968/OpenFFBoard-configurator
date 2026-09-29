@@ -1,6 +1,6 @@
 """Leave the board on a given driver so the GUI tab is available.
 
-Run with:  python tools/set_driver.py <drvtype> [COM port]
+Run with:  python tools/set_driver_mode.py <drvtype> [COM port]
 """
 
 import os
@@ -54,25 +54,29 @@ def main():
         port = chooser.port
         return port is not None and port.isOpen()
 
-    def ask(cls, cmd):
-        """Read one value and return its own raw reply."""
-        raw.clear()
-        marker = '%s.0.%s' % (cls, cmd)
-        chooser.send_command(cls, cmd, instance=0, typechar='?')
-        pump(4.0, until=lambda: any(marker in item for item in raw))
-        for item in raw:
-            if marker in item:
-                return item
-        return None
+    def ask(cls, cmd, seconds=6.0):
+        """Read one value, retrying past the unanswered-command placeholder.
 
-    chooser.serial_connect()
-    if not pump(12.0, until=connected):
-        print('could not connect')
-        return 1
-    pump(5.0, until=lambda: chooser.main_id is not None)
+        The board keeps streaming telemetry, and a command issued while a task
+        is still starting up answers with an empty value, so a single read is
+        not reliable right after a reboot.
+        """
+        marker = '%s.0.%s' % (cls, cmd)
+        deadline = time.monotonic() + seconds
+        last = None
+        while time.monotonic() < deadline:
+            raw.clear()
+            chooser.send_command(cls, cmd, instance=0, typechar='?')
+            pump(1.0, until=lambda: any(marker in item for item in raw))
+            for item in raw:
+                if marker in item:
+                    last = item
+                    if item.rsplit('|', 1)[-1].strip():
+                        return item
+        return last
 
     def set_and_save(value):
-        """Set axis.0.drvtype and wait until the flash write is acknowledged."""
+        """Set axis.0.drvtype and wait for the flash write acknowledgement."""
         window.send_value('axis', 'drvtype', value, instance=0)
         pump(1.5)
         raw.clear()
@@ -80,25 +84,27 @@ def main():
         acknowledged = pump(6.0, until=lambda: any(
             'axis.0.save' in item and 'OK' in item for item in raw))
         print('save acknowledged: %s' % acknowledged)
-        if not acknowledged:
-            print('  save replies: %r' % (raw[-4:],))
         pump(1.0)
+
+    chooser.serial_connect()
+    if not pump(12.0, until=connected):
+        print('could not connect')
+        return 1
+    pump(6.0, until=lambda: chooser.main_id is not None)
 
     print('drvtype before: %r' % ask('axis', 'drvtype'))
     set_and_save(DRIVER)
-    print('drvtype after set (before reboot): %r' % ask('axis', 'drvtype'))
-    window.send_value('sys', 'reboot', 1)
-    pump(3.0)
-    chooser.disconnect_port()
-    pump(3.0)
-    chooser.serial_connect()
-    if not pump(20.0, until=connected):
-        print('no reconnect')
-        return 1
-    pump(8.0, until=lambda: chooser.main_id is not None)
+    # No reboot: setDrvType() already tore the old driver down and started the
+    # new one, so the class is live now. Give the board a moment, then let its
+    # lsactive reply drive a tab rebuild.
+    pump(4.0)
+    chooser.send_command('sys', 'lsactive', instance=0, typechar='?')
+    pump(6.0, until=lambda: any(
+        'uart' in window.tabWidget_main.tabText(i).lower()
+        for i in range(window.tabWidget_main.count())))
 
-    print('drvtype now: %r' % ask('axis', 'drvtype'))
-    print('lsactive   : %r' % ask('sys', 'lsactive'))
+    print('drvtype now  : %r' % ask('axis', 'drvtype'))
+    print('lsactive     : %r' % ask('sys', 'lsactive', 8.0))
     print('board left on driver %d' % DRIVER)
 
     chooser.disconnect_port()
